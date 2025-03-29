@@ -8,14 +8,22 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import nodemailer from 'nodemailer';
 import crypto from 'crypto';
+import { v2 as cloudinary } from 'cloudinary'; // Add this import
 
 dotenv.config();
+
+// Cloudinary configuration
+cloudinary.config({
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+  api_key: process.env.CLOUDINARY_API_KEY,
+  api_secret: process.env.CLOUDINARY_API_SECRET
+});
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Create uploads directory
-const uploadsDir = path.join(__dirname, 'public', 'uploads');
+// Create temporary uploads directory (we'll delete files after upload to Cloudinary)
+const uploadsDir = path.join(__dirname, 'temp', 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
@@ -28,7 +36,6 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
-app.use('/uploads', express.static(path.join(__dirname, 'public', 'uploads')));
 
 // Logging middleware
 app.use((req, res, next) => {
@@ -43,7 +50,8 @@ const itemSchema = new mongoose.Schema({
   location: String,
   date: { type: Date, default: Date.now },
   status: { type: String, enum: ['lost', 'found'], required: true },
-  photo: String,
+  photo: String, // This will now store Cloudinary URL instead of local path
+  photoPublicId: String, // Store Cloudinary public ID for potential deletion later
   yourName: String,
   yourEmail: String,
   seenBy: [{
@@ -65,7 +73,7 @@ const itemSchema = new mongoose.Schema({
 
 const Item = mongoose.model('Item', itemSchema);
 
-// Multer configuration
+// Multer configuration - store files temporarily
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
       cb(null, uploadsDir);
@@ -171,6 +179,25 @@ app.post('/api/verify-otp', (req, res) => {
   res.json({ message: 'OTP verified successfully' });
 });
 
+// Helper function to upload to Cloudinary
+async function uploadToCloudinary(filePath) {
+  try {
+    const result = await cloudinary.uploader.upload(filePath, {
+      folder: 'campus-navigator'
+    });
+    
+    // Delete the local file after upload
+    fs.unlink(filePath, (err) => {
+      if (err) console.error('Error deleting temporary file:', err);
+    });
+    
+    return result;
+  } catch (error) {
+    console.error('Cloudinary upload error:', error);
+    throw error;
+  }
+}
+
 // Item Routes
 app.post('/api/items', upload.single('photo'), async (req, res) => {
   try {
@@ -183,13 +210,28 @@ app.post('/api/items', upload.single('photo'), async (req, res) => {
           return res.status(400).json({ message: 'Email not verified. Please verify your email first.' });
       }
 
-      const photoPath = req.file ? `/uploads/${req.file.filename}` : null;
+      let photoUrl = null;
+      let photoPublicId = null;
+      
+      // Upload to Cloudinary if there's a file
+      if (req.file) {
+        try {
+          const cloudinaryResult = await uploadToCloudinary(req.file.path);
+          photoUrl = cloudinaryResult.secure_url;
+          photoPublicId = cloudinaryResult.public_id;
+        } catch (uploadError) {
+          console.error('Error uploading to Cloudinary:', uploadError);
+          return res.status(500).json({ message: 'Error uploading image' });
+        }
+      }
+
       const newItem = new Item({
           name: req.body.name,
           description: req.body.description,
           location: req.body.location,
           status: req.body.status,
-          photo: photoPath,
+          photo: photoUrl,
+          photoPublicId: photoPublicId,
           yourName: req.body.yourName,
           yourEmail: req.body.yourEmail
       });
@@ -203,6 +245,7 @@ app.post('/api/items', upload.single('photo'), async (req, res) => {
   }
 });
 
+// The rest of your routes remain the same
 app.get('/api/items', async (req, res) => {
   try {
       const items = await Item.find().sort({ date: -1 });
@@ -364,7 +407,7 @@ mongoose.connect(process.env.MONGODB_URI, {
   console.log('MongoDB connected successfully');
   app.listen(port, () => {
       console.log(`Server running at http://localhost:${port}`);
-      console.log(`Uploads directory: ${uploadsDir}`);
+      console.log(`Temporary uploads directory: ${uploadsDir}`);
   });
 })
 .catch(err => {
