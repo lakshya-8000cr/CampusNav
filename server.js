@@ -84,10 +84,8 @@ const storage = multer.diskStorage({
   }
 });
 
-const storage = multer.memoryStorage();
-
 const upload = multer({
-  storage: storage, // ✅ Store file in memory
+  storage: storage,
   fileFilter: (req, file, cb) => {
       if (file.mimetype.startsWith('image/')) {
           cb(null, true);
@@ -96,7 +94,7 @@ const upload = multer({
       }
   },
   limits: {
-      fileSize: 5 * 1024 * 1024 // ✅ 5MB file size limit
+      fileSize: 5 * 1024 * 1024 // 5MB limit
   }
 });
 
@@ -204,7 +202,6 @@ async function uploadToCloudinary(filePath) {
 app.post('/api/items', upload.single('photo'), async (req, res) => {
   try {
       console.log('Received item creation request:', req.body);
-
       if (!req.body.name || !req.body.description || !req.body.location || !req.body.status || !req.body.yourName || !req.body.yourEmail) {
           return res.status(400).json({ message: 'Missing required fields' });
       }
@@ -215,18 +212,12 @@ app.post('/api/items', upload.single('photo'), async (req, res) => {
 
       let photoUrl = null;
       let photoPublicId = null;
-
-      // ✅ Upload to Cloudinary using `upload_stream`
+      
+      // Upload to Cloudinary if there's a file
       if (req.file) {
         try {
-          const cloudinaryResult = await new Promise((resolve, reject) => {
-              cloudinary.uploader.upload_stream({ resource_type: "image" }, (error, result) => {
-                  if (error) return reject(error);
-                  resolve(result);
-              }).end(req.file.buffer);
-          });
-
-          photoUrl = cloudinaryResult.secure_url;  // ✅ Make sure to use `secure_url`
+          const cloudinaryResult = await uploadToCloudinary(req.file.path);
+          photoUrl = cloudinaryResult.secure_url;
           photoPublicId = cloudinaryResult.public_id;
         } catch (uploadError) {
           console.error('Error uploading to Cloudinary:', uploadError);
@@ -253,7 +244,6 @@ app.post('/api/items', upload.single('photo'), async (req, res) => {
       res.status(500).json({ message: error.message });
   }
 });
-
 
 // The rest of your routes remain the same
 app.get('/api/items', async (req, res) => {
