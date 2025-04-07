@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 import fs from 'fs';
 import nodemailer from 'nodemailer';
 import crypto from 'crypto';
-import { v2 as cloudinary } from 'cloudinary'; // Add this import
+import { v2 as cloudinary } from 'cloudinary';
 
 dotenv.config();
 
@@ -45,12 +45,11 @@ app.use((req, res, next) => {
 
 // MongoDB Schema
 const itemSchema = new mongoose.Schema({
-
   name: String,
   description: String,
   location: String,
   date: { type: Date, default: Date.now },
-  status: { type: String, enum: ['lost', 'found' , 'resolved'], required: true },
+  status: { type: String, enum: ['lost', 'found', 'resolved'], required: true },
   photo: String, // This will now store Cloudinary URL instead of local path
   photoPublicId: String, // Store Cloudinary public ID for potential deletion later
   yourName: String,
@@ -69,8 +68,8 @@ const itemSchema = new mongoose.Schema({
       date: { type: Date, default: Date.now }
   }]
 }, {
-  collection: 'Lost-found',
-  status: { type: String, enum: ['lost', 'found', 'resolved'], required: true },
+  collection: 'Lost-found'
+  // Removed duplicate status field here that was causing the issue
 });
 
 const Item = mongoose.model('Item', itemSchema);
@@ -390,35 +389,6 @@ app.post('/api/items/:id/claim', async (req, res) => {
   }
 });
 
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({
-      message: 'Something went wrong!',
-      error: err.message
-  });
-});
-
-// Connect to MongoDB and start server
-mongoose.connect(process.env.MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-  dbName: 'CampusNavigatorDB'
-})
-.then(() => {
-  console.log('MongoDB connected successfully');
-  app.listen(port, () => {
-      console.log(`Server running at http://localhost:${port}`);
-      console.log(`Temporary uploads directory: ${uploadsDir}`);
-  });
-})
-.catch(err => {
-  console.error('MongoDB connection error:', err);
-  process.exit(1);
-});
-
-export default app;
-
 // New route to resolve an item
 app.post('/api/items/:id/resolve', async (req, res) => {
   try {
@@ -459,3 +429,31 @@ app.post('/api/items/:id/resolve', async (req, res) => {
   }
 });
 
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({
+      message: 'Something went wrong!',
+      error: err.message
+  });
+});
+
+// Connect to MongoDB and start server
+mongoose.connect(process.env.MONGODB_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+  dbName: 'CampusNavigatorDB'
+})
+.then(() => {
+  console.log('MongoDB connected successfully');
+  app.listen(port, () => {
+      console.log(`Server running at http://localhost:${port}`);
+      console.log(`Temporary uploads directory: ${uploadsDir}`);
+  });
+})
+.catch(err => {
+  console.error('MongoDB connection error:', err);
+  process.exit(1);
+});
+
+export default app;
