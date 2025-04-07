@@ -22,7 +22,7 @@ cloudinary.config({
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Create temporary uploads directory (we'll delete files after upload to Cloudinary)
+// Create temporary uploads directory
 const uploadsDir = path.join(__dirname, 'temp', 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
@@ -50,8 +50,8 @@ const itemSchema = new mongoose.Schema({
   location: String,
   date: { type: Date, default: Date.now },
   status: { type: String, enum: ['lost', 'found', 'resolved'], required: true },
-  photo: String, // This will now store Cloudinary URL instead of local path
-  photoPublicId: String, // Store Cloudinary public ID for potential deletion later
+  photo: String,
+  photoPublicId: String,
   yourName: String,
   yourEmail: String,
   seenBy: [{
@@ -69,12 +69,11 @@ const itemSchema = new mongoose.Schema({
   }]
 }, {
   collection: 'Lost-found'
-  // Removed duplicate status field here that was causing the issue
 });
 
 const Item = mongoose.model('Item', itemSchema);
 
-// Multer configuration - store files temporarily
+// Multer configuration
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
       cb(null, uploadsDir);
@@ -95,7 +94,7 @@ const upload = multer({
       }
   },
   limits: {
-      fileSize: 5 * 1024 * 1024 // 5MB limit
+      fileSize: 5 * 1024 * 1024
   }
 });
 
@@ -108,7 +107,7 @@ const transporter = nodemailer.createTransport({
   }
 });
 
-// OTP and Email verification
+// Verification stores
 const otpStore = new Map();
 const verifiedEmails = new Set();
 
@@ -133,7 +132,7 @@ async function sendOTPEmail(email, otp) {
   }
 }
 
-// Track submission counts separately for claims and seen
+// Submission counters
 const claimCounts = new Map();
 const seenCounts = new Map();
 
@@ -180,14 +179,13 @@ app.post('/api/verify-otp', (req, res) => {
   res.json({ message: 'OTP verified successfully' });
 });
 
-// Helper function to upload to Cloudinary
+// Cloudinary upload helper
 async function uploadToCloudinary(filePath) {
   try {
     const result = await cloudinary.uploader.upload(filePath, {
       folder: 'campus-navigator'
     });
     
-    // Delete the local file after upload
     fs.unlink(filePath, (err) => {
       if (err) console.error('Error deleting temporary file:', err);
     });
@@ -202,7 +200,6 @@ async function uploadToCloudinary(filePath) {
 // Item Routes
 app.post('/api/items', upload.single('photo'), async (req, res) => {
   try {
-      console.log('Received item creation request:', req.body);
       if (!req.body.name || !req.body.description || !req.body.location || !req.body.status || !req.body.yourName || !req.body.yourEmail) {
           return res.status(400).json({ message: 'Missing required fields' });
       }
@@ -214,14 +211,12 @@ app.post('/api/items', upload.single('photo'), async (req, res) => {
       let photoUrl = null;
       let photoPublicId = null;
       
-      // Upload to Cloudinary if there's a file
       if (req.file) {
         try {
           const cloudinaryResult = await uploadToCloudinary(req.file.path);
           photoUrl = cloudinaryResult.secure_url;
           photoPublicId = cloudinaryResult.public_id;
         } catch (uploadError) {
-          console.error('Error uploading to Cloudinary:', uploadError);
           return res.status(500).json({ message: 'Error uploading image' });
         }
       }
@@ -241,18 +236,15 @@ app.post('/api/items', upload.single('photo'), async (req, res) => {
       verifiedEmails.delete(req.body.yourEmail);
       res.status(201).json(newItem);
   } catch (error) {
-      console.error('Error saving item:', error);
       res.status(500).json({ message: error.message });
   }
 });
 
-// The rest of your routes remain the same
 app.get('/api/items', async (req, res) => {
   try {
       const items = await Item.find().sort({ date: -1 });
       res.json(items);
   } catch (error) {
-      console.error('Error fetching items:', error);
       res.status(500).json({ message: error.message });
   }
 });
@@ -260,12 +252,9 @@ app.get('/api/items', async (req, res) => {
 app.get('/api/items/:id', async (req, res) => {
   try {
       const item = await Item.findById(req.params.id);
-      if (!item) {
-          return res.status(404).json({ message: 'Item not found' });
-      }
+      if (!item) return res.status(404).json({ message: 'Item not found' });
       res.json(item);
   } catch (error) {
-      console.error('Error fetching item:', error);
       res.status(500).json({ message: error.message });
   }
 });
@@ -274,15 +263,13 @@ app.post('/api/items/:id/seen', async (req, res) => {
   try {
       const { name, phone, details, email } = req.body;
       
-      // Check if email is provided and valid
       if (!email || !email.match(/^[a-zA-Z0-9]+[0-9]{4}\.(?:be|btech|mtech|phd)[a-zA-Z]{2,4}[0-9]{2}@chitkara\.edu\.in$/)) {
-          return res.status(400).json({ message: 'Valid Chitkara University email is required.' });
+          return res.status(400).json({ message: 'Valid Chitkara University email required.' });
       }
 
-      // Check seen count
       const seenCount = seenCounts.get(email) || 0;
       if (seenCount >= 2) {
-          return res.status(400).json({ message: 'You have reached the maximum number of information submissions allowed (2).' });
+          return res.status(400).json({ message: 'Maximum information submissions reached (2).' });
       }
 
       const item = await Item.findByIdAndUpdate(
@@ -291,38 +278,24 @@ app.post('/api/items/:id/seen', async (req, res) => {
           { new: true }
       );
 
-      if (!item) {
-          return res.status(404).json({ message: 'Item not found' });
-      }
+      if (!item) return res.status(404).json({ message: 'Item not found' });
 
-      // Increment seen count
       seenCounts.set(email, seenCount + 1);
 
-      // Send email notification
       const mailOptions = {
           from: process.env.EMAIL_USER,
           to: item.yourEmail,
           subject: `Someone has seen your lost item: ${item.name}`,
-          text: `
-              Someone has information about your lost item: ${item.name}
-              
-              Details:
-              Name: ${name}
-              Phone: ${phone}
-              Message: ${details}
-              
-              Please contact them for more information.
-          `
+          text: `Contact details:\nName: ${name}\nPhone: ${phone}\nMessage: ${details}`
       };
 
       try {
           await transporter.sendMail(mailOptions);
           res.json({ message: 'Information submitted and owner notified', notificationSent: true });
       } catch (error) {
-          res.json({ message: 'Information submitted but owner could not be notified', notificationSent: false });
+          res.json({ message: 'Information submitted but notification failed', notificationSent: false });
       }
   } catch (error) {
-      console.error('Error submitting information:', error);
       res.status(500).json({ message: error.message });
   }
 });
@@ -331,20 +304,17 @@ app.post('/api/items/:id/claim', async (req, res) => {
   try {
       const { name, email, details } = req.body;
       
-      // Check if email is provided and valid
       if (!email || !email.match(/^[a-zA-Z0-9]+[0-9]{4}\.(?:be|btech|mtech|phd)[a-zA-Z]{2,4}[0-9]{2}@chitkara\.edu\.in$/)) {
-          return res.status(400).json({ message: 'Valid Chitkara University email is required.' });
+          return res.status(400).json({ message: 'Valid Chitkara University email required.' });
       }
 
-      // Verify email is verified
       if (!verifiedEmails.has(email)) {
-          return res.status(403).json({ message: 'Email not verified. Please verify your email first.' });
+          return res.status(403).json({ message: 'Email not verified. Verify email first.' });
       }
 
-      // Check claim count
       const claimCount = claimCounts.get(email) || 0;
       if (claimCount >= 2) {
-          return res.status(400).json({ message: 'You have reached the maximum number of claims allowed (2).' });
+          return res.status(400).json({ message: 'Maximum claims reached (2).' });
       }
 
       const item = await Item.findByIdAndUpdate(
@@ -353,106 +323,108 @@ app.post('/api/items/:id/claim', async (req, res) => {
           { new: true }
       );
 
-      if (!item) {
-          return res.status(404).json({ message: 'Item not found' });
-      }
+      if (!item) return res.status(404).json({ message: 'Item not found' });
 
-      // Increment claim count
       claimCounts.set(email, claimCount + 1);
 
-      // Send email notification
       const mailOptions = {
           from: process.env.EMAIL_USER,
           to: item.yourEmail,
-          subject: `Someone has claimed the found item: ${item.name}`,
-          text: `
-              Someone has claimed the found item: ${item.name}
-              
-              Claimant Details:
-              Name: ${name}
-              Email: ${email}
-              Message: ${details}
-              
-              Please review the claim and contact them if the details match.
-          `
+          subject: `Claim for found item: ${item.name}`,
+          text: `Claimant details:\nName: ${name}\nEmail: ${email}\nMessage: ${details}`
       };
 
       try {
           await transporter.sendMail(mailOptions);
-          res.json({ message: 'Claim submitted and finder notified', notificationSent: true });
+          res.json({ message: 'Claim submitted and notification sent', notificationSent: true });
       } catch (error) {
-          res.json({ message: 'Claim submitted but finder could not be notified', notificationSent: false });
+          res.json({ message: 'Claim submitted but notification failed', notificationSent: false });
       }
   } catch (error) {
-      console.error('Error submitting claim:', error);
       res.status(500).json({ message: error.message });
   }
 });
 
-// New route to resolve an item
-app.post('/api/items/:id/resolve', async (req, res) => {
+// New Check Email Route
+app.post('/api/items/:id/check-email', async (req, res) => {
   try {
     const { email } = req.body;
-    
     const item = await Item.findById(req.params.id);
-    if (!item) {
-      return res.status(404).json({ message: 'Item not found' });
-    }
-
+    
+    if (!item) return res.status(404).json({ message: 'Item not found' });
     if (email !== item.yourEmail) {
-      return res.status(403).json({ message: 'You are not authorized to resolve this item. Only the person who reported this item can resolve it.' });
+      return res.status(403).json({ 
+        message: 'Email does not match reporting email.',
+        emailMatches: false
+      });
     }
 
-    item.status = 'resolved';
-    await item.save();
-
-    const mailOptions = {
-      from: process.env.EMAIL_USER,
-      to: item.yourEmail,
-      subject: `Your item has been marked as resolved: ${item.name}`,
-      text: `
-        Your item "${item.name}" has been marked as resolved.
-        
-        Thank you for using Campus Navigator!
-      `
-    };
-
-    try {
-      await transporter.sendMail(mailOptions);
-      res.json({ message: 'Item resolved successfully and notification sent', notificationSent: true });
-    } catch (error) {
-      res.json({ message: 'Item resolved successfully but notification could not be sent', notificationSent: false });
-    }
+    res.json({ 
+      message: 'Email verified. Proceed with OTP.',
+      emailMatches: true
+    });
   } catch (error) {
-    console.error('Error resolving item:', error);
     res.status(500).json({ message: error.message });
   }
 });
 
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  res.status(500).json({
-      message: 'Something went wrong!',
-      error: err.message
-  });
+// Updated Resolve Route with OTP Verification
+app.post('/api/items/:id/resolve', async (req, res) => {
+  try {
+    const { email } = req.body;
+    const item = await Item.findById(req.params.id);
+    
+    if (!item) return res.status(404).json({ message: 'Item not found' });
+    if (email !== item.yourEmail) {
+      return res.status(403).json({ message: 'Not authorized to resolve this item.' });
+    }
+    if (!verifiedEmails.has(email)) {
+      return res.status(403).json({ message: 'Email not verified. Verify with OTP first.' });
+    }
+
+    item.status = 'resolved';
+    await item.save();
+    verifiedEmails.delete(email);
+
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: `Item Resolved: ${item.name}`,
+      text: `Your item "${item.name}" has been marked as resolved.`
+    };
+
+    try {
+      await transporter.sendMail(mailOptions);
+      res.json({ message: 'Item resolved and notification sent', notificationSent: true });
+    } catch (error) {
+      res.json({ message: 'Item resolved but notification failed', notificationSent: false });
+    }
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
 });
 
-// Connect to MongoDB and start server
+// Error handling
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ message: 'Server error', error: err.message });
+});
+
+// MongoDB connection
 mongoose.connect(process.env.MONGODB_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
   dbName: 'CampusNavigatorDB'
 })
 .then(() => {
-  console.log('MongoDB connected successfully');
+  console.log('MongoDB connected');
   app.listen(port, () => {
-      console.log(`Server running at http://localhost:${port}`);
-      console.log(`Temporary uploads directory: ${uploadsDir}`);
+    console.log(`Server running on port ${port}`);
+    console.log(`Temporary uploads at: ${uploadsDir}`);
   });
 })
 .catch(err => {
-  console.error('MongoDB connection error:', err);
+  console.error('MongoDB connection failed:', err);
   process.exit(1);
 });
 
