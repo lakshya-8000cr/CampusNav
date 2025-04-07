@@ -45,6 +45,7 @@ app.use((req, res, next) => {
 
 // MongoDB Schema
 const itemSchema = new mongoose.Schema({
+
   name: String,
   description: String,
   location: String,
@@ -68,7 +69,8 @@ const itemSchema = new mongoose.Schema({
       date: { type: Date, default: Date.now }
   }]
 }, {
-  collection: 'Lost-found'
+  collection: 'Lost-found',
+  status: { type: String, enum: ['lost', 'found', 'resolved'], required: true },
 });
 
 const Item = mongoose.model('Item', itemSchema);
@@ -416,3 +418,44 @@ mongoose.connect(process.env.MONGODB_URI, {
 });
 
 export default app;
+
+// New route to resolve an item
+app.post('/api/items/:id/resolve', async (req, res) => {
+  try {
+    const { email } = req.body;
+    
+    const item = await Item.findById(req.params.id);
+    if (!item) {
+      return res.status(404).json({ message: 'Item not found' });
+    }
+
+    if (email !== item.yourEmail) {
+      return res.status(403).json({ message: 'You are not authorized to resolve this item. Only the person who reported this item can resolve it.' });
+    }
+
+    item.status = 'resolved';
+    await item.save();
+
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: item.yourEmail,
+      subject: `Your item has been marked as resolved: ${item.name}`,
+      text: `
+        Your item "${item.name}" has been marked as resolved.
+        
+        Thank you for using Campus Navigator!
+      `
+    };
+
+    try {
+      await transporter.sendMail(mailOptions);
+      res.json({ message: 'Item resolved successfully and notification sent', notificationSent: true });
+    } catch (error) {
+      res.json({ message: 'Item resolved successfully but notification could not be sent', notificationSent: false });
+    }
+  } catch (error) {
+    console.error('Error resolving item:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
