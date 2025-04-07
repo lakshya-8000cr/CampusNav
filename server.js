@@ -50,7 +50,7 @@ const itemSchema = new mongoose.Schema({
   description: String,
   location: String,
   date: { type: Date, default: Date.now },
-  status: { type: String, enum: ['lost', 'found'], required: true },
+  status: { type: String, enum: ['lost', 'found' , 'resolved'], required: true },
   photo: String, // This will now store Cloudinary URL instead of local path
   photoPublicId: String, // Store Cloudinary public ID for potential deletion later
   yourName: String,
