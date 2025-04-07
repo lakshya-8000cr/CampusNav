@@ -12,7 +12,7 @@ import { v2 as cloudinary } from 'cloudinary';
 
 dotenv.config();
 
-// Cloudinary Configuration
+// Cloudinary configuration
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
   api_key: process.env.CLOUDINARY_API_KEY,
@@ -22,12 +22,13 @@ cloudinary.config({
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Temporary Upload Directory
+// Create temporary uploads directory (we'll delete files after upload to Cloudinary)
 const uploadsDir = path.join(__dirname, 'temp', 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
+// Initialize Express app
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -36,9 +37,9 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Enhanced Logging
+// Logging middleware
 app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.originalUrl}`);
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
   next();
 });
 
@@ -48,315 +49,410 @@ const itemSchema = new mongoose.Schema({
   description: String,
   location: String,
   date: { type: Date, default: Date.now },
-  status: { 
-    type: String, 
-    enum: ['lost', 'found', 'resolved'], 
-    required: true 
-  },
-  photo: String,
-  photoPublicId: String,
+  status: { type: String, enum: ['lost', 'found', 'resolved'], required: true },
+  photo: String, // This will now store Cloudinary URL instead of local path
+  photoPublicId: String, // Store Cloudinary public ID for potential deletion later
   yourName: String,
-  yourEmail: {
-    type: String,
-    required: true,
-    match: /^[a-zA-Z0-9]+[0-9]{4}\.(?:be|btech|mtech|phd)[a-zA-Z]{2,4}[0-9]{2}@chitkara\.edu\.in$/
-  },
+  yourEmail: String,
   seenBy: [{
-    name: String,
-    phone: String,
-    details: String,
-    date: { type: Date, default: Date.now },
-    email: String
+      name: String,
+      phone: String,
+      details: String,
+      date: { type: Date, default: Date.now },
+      email: String
   }],
   claims: [{
-    name: String,
-    email: String,
-    details: String,
-    date: { type: Date, default: Date.now }
+      name: String,
+      email: String,
+      details: String,
+      date: { type: Date, default: Date.now }
   }]
-}, { collection: 'Lost-found' });
+}, {
+  collection: 'Lost-found'
+  // Removed duplicate status field here that was causing the issue
+});
 
 const Item = mongoose.model('Item', itemSchema);
 
-// File Upload Configuration
+// Multer configuration - store files temporarily
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, uploadsDir),
+  destination: (req, file, cb) => {
+      cb(null, uploadsDir);
+  },
   filename: (req, file, cb) => {
-    cb(null, `${Date.now()}-${Math.random().toString(36).substr(2, 9)}-${file.originalname}`);
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      cb(null, uniqueSuffix + '-' + file.originalname);
   }
 });
 
 const upload = multer({
-  storage,
+  storage: storage,
   fileFilter: (req, file, cb) => {
-    file.mimetype.startsWith('image/') ? cb(null, true) : cb(new Error('Only images allowed'));
+      if (file.mimetype.startsWith('image/')) {
+          cb(null, true);
+      } else {
+          cb(new Error('Only image files are allowed!'), false);
+      }
   },
-  limits: { fileSize: 10 * 1024 * 1024 } // 10MB
+  limits: {
+      fileSize: 5 * 1024 * 1024 // 5MB limit
+  }
 });
 
-// Email Configuration
+// Nodemailer configuration
 const transporter = nodemailer.createTransport({
   service: process.env.EMAIL_SERVICE,
   auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS
   }
 });
 
-// Security Stores
+// OTP and Email verification
 const otpStore = new Map();
 const verifiedEmails = new Set();
 
-// OTP Functions
-const generateOTP = () => crypto.randomInt(100000, 999999).toString();
+function generateOTP() {
+  return crypto.randomInt(100000, 999999).toString();
+}
 
 async function sendOTPEmail(email, otp) {
-  try {
-    await transporter.verify();
-    
-    const mailOptions = {
-      from: `Campus Navigator <${process.env.EMAIL_USER}>`,
+  const mailOptions = {
+      from: process.env.EMAIL_USER,
       to: email,
-      subject: 'Your Verification Code',
-      text: `Your OTP is: ${otp}\nValid for 10 minutes.`,
-      html: `<div style="font-family: Arial, sans-serif; padding: 20px;">
-              <h2>Campus Navigator Verification</h2>
-              <p>Your verification code is:</p>
-              <h1 style="color: #2563eb;">${otp}</h1>
-              <p>This code will expire in 10 minutes.</p>
-            </div>`
-    };
+      subject: 'Your OTP for Campus Navigator',
+      text: `Your OTP is: ${otp}. This OTP will expire in 10 minutes.`
+  };
 
-    const info = await transporter.sendMail(mailOptions);
-    console.log(`OTP sent to ${email}:`, info.messageId);
-    return true;
+  try {
+      await transporter.sendMail(mailOptions);
+      console.log('OTP email sent successfully');
   } catch (error) {
-    console.error('Email Error:', error);
-    throw new Error('Failed to send OTP. Please try again later.');
+      console.error('Error sending OTP email:', error);
+      throw error;
   }
 }
 
-// OTP Endpoints
-app.post('/api/items/:id/request-otp', async (req, res) => {
+// Track submission counts separately for claims and seen
+const claimCounts = new Map();
+const seenCounts = new Map();
+
+// Auth Routes
+app.post('/api/request-otp', async (req, res) => {
+  const { email } = req.body;
+  if (!email) {
+      return res.status(400).json({ message: 'Email is required' });
+  }
+
   try {
-    const { email } = req.body;
-    const itemId = req.params.id;
-
-    // Validation
-    if (!email || !itemId) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Email and item ID required' 
-      });
-    }
-
-    // Find item
-    const item = await Item.findById(itemId);
-    if (!item) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Item not found' 
-      });
-    }
-
-    // Email verification
-    if (email !== item.yourEmail) {
-      return res.status(403).json({ 
-        success: false,
-        message: 'This email does not match the original reporter',
-        emailVerified: false
-      });
-    }
-
-    // Generate and send OTP
-    try {
       const otp = generateOTP();
       await sendOTPEmail(email, otp);
-      otpStore.set(email, { 
-        otp, 
-        expiry: Date.now() + 600000,
-        itemId 
-      });
-
-      return res.json({ 
-        success: true,
-        message: 'OTP sent to registered email',
-        emailVerified: true
-      });
-
-    } catch (error) {
-      return res.status(500).json({ 
-        success: false,
-        message: error.message || 'Failed to send OTP',
-        emailError: true
-      });
-    }
-
+      otpStore.set(email, { otp, expiry: Date.now() + 600000 });
+      res.json({ message: 'OTP sent successfully' });
   } catch (error) {
-    console.error('OTP Request Error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Internal server error' 
-    });
+      console.error('Error in OTP request:', error);
+      res.status(500).json({ message: 'Error sending OTP' });
   }
 });
 
 app.post('/api/verify-otp', (req, res) => {
-  try {
-    const { email, otp } = req.body;
-    
-    // Validate input
-    if (!email || !otp) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Email and OTP required' 
-      });
-    }
+  const { email, otp } = req.body;
+  if (!email || !otp) {
+      return res.status(400).json({ message: 'Email and OTP are required' });
+  }
 
-    // Check OTP existence
-    const storedData = otpStore.get(email);
-    if (!storedData) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'OTP expired or invalid' 
-      });
-    }
+  const storedOTPData = otpStore.get(email);
+  if (!storedOTPData) {
+      return res.status(400).json({ message: 'No OTP found for this email' });
+  }
 
-    // Validate OTP
-    if (Date.now() > storedData.expiry) {
+  if (Date.now() > storedOTPData.expiry) {
       otpStore.delete(email);
-      return res.status(400).json({ 
-        success: false, 
-        message: 'OTP expired' 
-      });
-    }
+      return res.status(400).json({ message: 'OTP has expired' });
+  }
 
-    if (otp !== storedData.otp) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Invalid OTP' 
-      });
-    }
+  if (otp !== storedOTPData.otp) {
+      return res.status(400).json({ message: 'Invalid OTP' });
+  }
 
-    // Mark email as verified
-    verifiedEmails.add(email);
-    otpStore.delete(email);
+  verifiedEmails.add(email);
+  otpStore.delete(email);
+  res.json({ message: 'OTP verified successfully' });
+});
 
-    res.json({ 
-      success: true,
-      message: 'OTP verified successfully',
-      itemId: storedData.itemId
+// Helper function to upload to Cloudinary
+async function uploadToCloudinary(filePath) {
+  try {
+    const result = await cloudinary.uploader.upload(filePath, {
+      folder: 'campus-navigator'
     });
-
+    
+    // Delete the local file after upload
+    fs.unlink(filePath, (err) => {
+      if (err) console.error('Error deleting temporary file:', err);
+    });
+    
+    return result;
   } catch (error) {
-    res.status(500).json({ 
-      success: false, 
-      message: 'Internal server error' 
-    });
+    console.error('Cloudinary upload error:', error);
+    throw error;
+  }
+}
+
+// Item Routes
+app.post('/api/items', upload.single('photo'), async (req, res) => {
+  try {
+      console.log('Received item creation request:', req.body);
+      if (!req.body.name || !req.body.description || !req.body.location || !req.body.status || !req.body.yourName || !req.body.yourEmail) {
+          return res.status(400).json({ message: 'Missing required fields' });
+      }
+
+      if (!verifiedEmails.has(req.body.yourEmail)) {
+          return res.status(400).json({ message: 'Email not verified. Please verify your email first.' });
+      }
+
+      let photoUrl = null;
+      let photoPublicId = null;
+      
+      // Upload to Cloudinary if there's a file
+      if (req.file) {
+        try {
+          const cloudinaryResult = await uploadToCloudinary(req.file.path);
+          photoUrl = cloudinaryResult.secure_url;
+          photoPublicId = cloudinaryResult.public_id;
+        } catch (uploadError) {
+          console.error('Error uploading to Cloudinary:', uploadError);
+          return res.status(500).json({ message: 'Error uploading image' });
+        }
+      }
+
+      const newItem = new Item({
+          name: req.body.name,
+          description: req.body.description,
+          location: req.body.location,
+          status: req.body.status,
+          photo: photoUrl,
+          photoPublicId: photoPublicId,
+          yourName: req.body.yourName,
+          yourEmail: req.body.yourEmail
+      });
+
+      await newItem.save();
+      verifiedEmails.delete(req.body.yourEmail);
+      res.status(201).json(newItem);
+  } catch (error) {
+      console.error('Error saving item:', error);
+      res.status(500).json({ message: error.message });
   }
 });
 
-// Item Resolution
+// The rest of your routes remain the same
+app.get('/api/items', async (req, res) => {
+  try {
+      const items = await Item.find().sort({ date: -1 });
+      res.json(items);
+  } catch (error) {
+      console.error('Error fetching items:', error);
+      res.status(500).json({ message: error.message });
+  }
+});
+
+app.get('/api/items/:id', async (req, res) => {
+  try {
+      const item = await Item.findById(req.params.id);
+      if (!item) {
+          return res.status(404).json({ message: 'Item not found' });
+      }
+      res.json(item);
+  } catch (error) {
+      console.error('Error fetching item:', error);
+      res.status(500).json({ message: error.message });
+  }
+});
+
+app.post('/api/items/:id/seen', async (req, res) => {
+  try {
+      const { name, phone, details, email } = req.body;
+      
+      // Check if email is provided and valid
+      if (!email || !email.match(/^[a-zA-Z0-9]+[0-9]{4}\.(?:be|btech|mtech|phd)[a-zA-Z]{2,4}[0-9]{2}@chitkara\.edu\.in$/)) {
+          return res.status(400).json({ message: 'Valid Chitkara University email is required.' });
+      }
+
+      // Check seen count
+      const seenCount = seenCounts.get(email) || 0;
+      if (seenCount >= 2) {
+          return res.status(400).json({ message: 'You have reached the maximum number of information submissions allowed (2).' });
+      }
+
+      const item = await Item.findByIdAndUpdate(
+          req.params.id,
+          { $push: { seenBy: { name, phone, details, email } } },
+          { new: true }
+      );
+
+      if (!item) {
+          return res.status(404).json({ message: 'Item not found' });
+      }
+
+      // Increment seen count
+      seenCounts.set(email, seenCount + 1);
+
+      // Send email notification
+      const mailOptions = {
+          from: process.env.EMAIL_USER,
+          to: item.yourEmail,
+          subject: `Someone has seen your lost item: ${item.name}`,
+          text: `
+              Someone has information about your lost item: ${item.name}
+              
+              Details:
+              Name: ${name}
+              Phone: ${phone}
+              Message: ${details}
+              
+              Please contact them for more information.
+          `
+      };
+
+      try {
+          await transporter.sendMail(mailOptions);
+          res.json({ message: 'Information submitted and owner notified', notificationSent: true });
+      } catch (error) {
+          res.json({ message: 'Information submitted but owner could not be notified', notificationSent: false });
+      }
+  } catch (error) {
+      console.error('Error submitting information:', error);
+      res.status(500).json({ message: error.message });
+  }
+});
+
+app.post('/api/items/:id/claim', async (req, res) => {
+  try {
+      const { name, email, details } = req.body;
+      
+      // Check if email is provided and valid
+      if (!email || !email.match(/^[a-zA-Z0-9]+[0-9]{4}\.(?:be|btech|mtech|phd)[a-zA-Z]{2,4}[0-9]{2}@chitkara\.edu\.in$/)) {
+          return res.status(400).json({ message: 'Valid Chitkara University email is required.' });
+      }
+
+      // Verify email is verified
+      if (!verifiedEmails.has(email)) {
+          return res.status(403).json({ message: 'Email not verified. Please verify your email first.' });
+      }
+
+      // Check claim count
+      const claimCount = claimCounts.get(email) || 0;
+      if (claimCount >= 2) {
+          return res.status(400).json({ message: 'You have reached the maximum number of claims allowed (2).' });
+      }
+
+      const item = await Item.findByIdAndUpdate(
+          req.params.id,
+          { $push: { claims: { name, email, details } } },
+          { new: true }
+      );
+
+      if (!item) {
+          return res.status(404).json({ message: 'Item not found' });
+      }
+
+      // Increment claim count
+      claimCounts.set(email, claimCount + 1);
+
+      // Send email notification
+      const mailOptions = {
+          from: process.env.EMAIL_USER,
+          to: item.yourEmail,
+          subject: `Someone has claimed the found item: ${item.name}`,
+          text: `
+              Someone has claimed the found item: ${item.name}
+              
+              Claimant Details:
+              Name: ${name}
+              Email: ${email}
+              Message: ${details}
+              
+              Please review the claim and contact them if the details match.
+          `
+      };
+
+      try {
+          await transporter.sendMail(mailOptions);
+          res.json({ message: 'Claim submitted and finder notified', notificationSent: true });
+      } catch (error) {
+          res.json({ message: 'Claim submitted but finder could not be notified', notificationSent: false });
+      }
+  } catch (error) {
+      console.error('Error submitting claim:', error);
+      res.status(500).json({ message: error.message });
+  }
+});
+
+// New route to resolve an item
 app.post('/api/items/:id/resolve', async (req, res) => {
   try {
     const { email } = req.body;
-    const itemId = req.params.id;
-
-    // Validate input
-    if (!email || !itemId) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Email and item ID required' 
-      });
-    }
-
-    // Find item
-    const item = await Item.findById(itemId);
+    
+    const item = await Item.findById(req.params.id);
     if (!item) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Item not found' 
-      });
+      return res.status(404).json({ message: 'Item not found' });
     }
 
-    // Authorization checks
     if (email !== item.yourEmail) {
-      return res.status(403).json({ 
-        success: false,
-        message: 'Unauthorized to resolve this item',
-        authorized: false
-      });
+      return res.status(403).json({ message: 'You are not authorized to resolve this item. Only the person who reported this item can resolve it.' });
     }
 
-    if (!verifiedEmails.has(email)) {
-      return res.status(403).json({ 
-        success: false,
-        message: 'Email not verified with OTP',
-        verified: false
-      });
-    }
-
-    // Update item status
     item.status = 'resolved';
     await item.save();
 
-    // Cleanup
-    verifiedEmails.delete(email);
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: item.yourEmail,
+      subject: `Your item has been marked as resolved: ${item.name}`,
+      text: `
+        Your item "${item.name}" has been marked as resolved.
+        
+        Thank you for using Campus Navigator!
+      `
+    };
 
-    // Send confirmation
     try {
-      await transporter.sendMail({
-        from: process.env.EMAIL_USER,
-        to: email,
-        subject: `Item Resolved: ${item.name}`,
-        text: `Your item "${item.name}" has been marked as resolved.`
-      });
-    } catch (emailError) {
-      console.error('Confirmation Email Error:', emailError);
+      await transporter.sendMail(mailOptions);
+      res.json({ message: 'Item resolved successfully and notification sent', notificationSent: true });
+    } catch (error) {
+      res.json({ message: 'Item resolved successfully but notification could not be sent', notificationSent: false });
     }
-
-    res.json({ 
-      success: true,
-      message: 'Item resolved successfully',
-      resolved: true
-    });
-
   } catch (error) {
-    console.error('Resolution Error:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Internal server error' 
-    });
+    console.error('Error resolving item:', error);
+    res.status(500).json({ message: error.message });
   }
 });
 
-// Other Routes (Keep existing implementations)
-// ... [Include your existing /api/items, /seen, /claim routes here] ...
-
-// Error Handler
+// Error handling middleware
 app.use((err, req, res, next) => {
-  console.error('Global Error:', err);
-  res.status(500).json({ 
-    success: false, 
-    message: 'An unexpected error occurred' 
+  console.error(err.stack);
+  res.status(500).json({
+      message: 'Something went wrong!',
+      error: err.message
   });
 });
 
-// Database Connection
+// Connect to MongoDB and start server
 mongoose.connect(process.env.MONGODB_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
   dbName: 'CampusNavigatorDB'
 })
 .then(() => {
-  console.log('MongoDB connected');
+  console.log('MongoDB connected successfully');
   app.listen(port, () => {
-    console.log(`Server running on port ${port}`);
-    console.log(`Temporary uploads directory: ${uploadsDir}`);
+      console.log(`Server running at http://localhost:${port}`);
+      console.log(`Temporary uploads directory: ${uploadsDir}`);
   });
 })
 .catch(err => {
-  console.error('Database Connection Error:', err);
+  console.error('MongoDB connection error:', err);
   process.exit(1);
 });
 
