@@ -32,6 +32,11 @@ if (!fs.existsSync(uploadsDir)) {
 const app = express();
 const port = process.env.PORT || 3000;
 
+// for loader and testing 
+app.get('/loaderio-fcaa3de5617d3e219404cf23593594f1.txt', (req, res) => {
+  res.sendFile(path.join(__dirname, 'loaderio-fcaa3de5617d3e219404cf23593594f1.txt'));
+});
+
 // Middleware
 app.use(cors());
 app.use(express.json());
